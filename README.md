@@ -1,5 +1,12 @@
 # Tornado Aircon Custom Component for Home Assistant
 
+> [!NOTE]
+> This is a maintained reliability fork of
+> [romfreiman/tornado-aircon-custom-component](https://github.com/romfreiman/tornado-aircon-custom-component),
+> based on upstream release `v1.2.2`. Release `v1.2.3` fixes the ignored
+> Home Assistant HTTP session, reduces duplicate cloud polling, and preserves
+> the last successful device state during transient AuxCloud failures.
+
 ## Description
 
 This custom component integrates Tornado Aircon devices with Home Assistant, allowing you to control and monitor your air conditioning units directly from the Home Assistant interface.
@@ -9,7 +16,7 @@ This custom component integrates Tornado Aircon devices with Home Assistant, all
 ### Option 1: Manual Installation
 
 1. Download the `custom_components` folder from this repository.
-2. Copy the `custom_components/tornado_aircon` directory into your Home Assistant `config/custom_components` directory.
+2. Copy the `custom_components/tornado` directory into your Home Assistant `config/custom_components` directory.
 3. Restart Home Assistant.
 
 ### Option 2: Installation via HACS
@@ -17,7 +24,7 @@ This custom component integrates Tornado Aircon devices with Home Assistant, all
 1. Ensure you have [HACS](https://hacs.xyz/) installed in your Home Assistant setup.
 2. Navigate to **HACS** → **Integrations**.
 3. Click the three dots menu in the top right corner and select **Custom repositories**.
-4. Add the repository URL `https://github.com/romfreiman/tornado-aircon-custom-component` and select the category as **Integration**.
+4. Add the repository URL `https://github.com/LmaBaDa/tornado-aircon-custom-component` and select the category as **Integration**.
 5. Find and install the "Tornado Air Conditioner" integration from the HACS store.
 6. Restart Home Assistant.
 
@@ -46,7 +53,7 @@ Once configured, you will see new entities in Home Assistant for each Tornado Ai
 
 ## Troubleshooting
 
-If you encounter any issues, please check the Home Assistant logs for error messages. You can also open an issue on the [GitHub repository](https://github.com/romfreiman/tornado-aircon-custom-component/issues).
+If you encounter any issues, please check the Home Assistant logs for error messages. You can also open an issue on the [GitHub repository](https://github.com/LmaBaDa/tornado-aircon-custom-component/issues).
 
 ## Contributing
 

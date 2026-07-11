@@ -9,6 +9,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .aux_cloud import AuxCloudAPI
 from .const import CONF_REGION, DOMAIN, REGIONS
@@ -41,6 +42,7 @@ class TornadoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     email=user_input[CONF_EMAIL],
                     password=user_input[CONF_PASSWORD],
                     region=user_input[CONF_REGION],
+                    session=async_get_clientsession(self.hass),
                 )
                 await client.login()
 
@@ -95,6 +97,7 @@ class TornadoOptionsFlow(config_entries.OptionsFlow):
                     email=self.config_entry.data[CONF_EMAIL],
                     password=self.config_entry.data[CONF_PASSWORD],
                     region=user_input[CONF_REGION],
+                    session=async_get_clientsession(self.hass),
                 )
                 await client.login()
 

@@ -1,6 +1,7 @@
 """Tests for the Tornado AC climate component."""
 
 import contextlib
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -56,7 +57,7 @@ async def coordinator(
     hass: HomeAssistant, mock_api: MagicMock
 ) -> AuxCloudDataUpdateCoordinator:
     """Create a mocked coordinator."""
-    coordinator = AuxCloudDataUpdateCoordinator(hass, mock_api)
+    coordinator = AuxCloudDataUpdateCoordinator(hass, mock_api, None)
     coordinator.data = {MOCK_DEVICE["endpointId"]: MOCK_DEVICE}
     await coordinator.async_refresh()  # Ensure initial data is set
     return coordinator
@@ -67,7 +68,7 @@ async def entity(
     hass: HomeAssistant, coordinator: AuxCloudDataUpdateCoordinator
 ) -> TornadoClimateEntity:
     """Create a mocked climate entity."""
-    entity = TornadoClimateEntity(hass, coordinator, MOCK_DEVICE)
+    entity = TornadoClimateEntity(coordinator, MOCK_DEVICE)
     entity.entity_id = "climate.test_ac"
     entity.hass = hass
     # Ensure the entity registers with the coordinator
@@ -89,6 +90,8 @@ async def test_climate_entity_initialization(entity: TornadoClimateEntity) -> No
     assert entity.temperature_unit == UnitOfTemperature.CELSIUS
     assert entity.min_temp == MIN_TEMP
     assert entity.max_temp == MAX_TEMP
+    assert entity.should_poll is False
+    assert entity.coordinator.update_interval == timedelta(minutes=5)
 
 
 async def test_climate_update(entity: TornadoClimateEntity) -> None:
@@ -131,7 +134,7 @@ async def test_coordinator_update_error(
 ) -> None:
     """Test coordinator update with error."""
     mock_api.get_devices.side_effect = Exception("API Error")
-    coordinator = AuxCloudDataUpdateCoordinator(hass, mock_api)
+    coordinator = AuxCloudDataUpdateCoordinator(hass, mock_api, None)
 
     # Test that the coordinator's update method raises the exception
     with pytest.raises(Exception, match="API Error"):
@@ -267,18 +270,27 @@ async def test_temperature_limits(entity: TornadoClimateEntity) -> None:
 async def test_coordinator_update_with_invalid_data(
     coordinator: AuxCloudDataUpdateCoordinator, entity: TornadoClimateEntity
 ) -> None:
-    """Test coordinator update with invalid data."""
-    # Test with missing device
-    coordinator.data = {}
-    await entity.async_update()
-    assert entity.available  # Entity remains available even without data
-    assert entity.hvac_mode == HVACMode.COOL  # Retains last known mode
+    """Test cached state survives a transient coordinator failure."""
+    coordinator.last_update_success = False
+    entity._handle_coordinator_update()
+    assert entity.available
+    assert entity.hvac_mode == HVACMode.COOL
 
     # Test with invalid params
     coordinator.data = {MOCK_DEVICE["endpointId"]: {"params": {}}}
-    await entity.async_update()
+    entity._handle_coordinator_update()
     assert entity.available
-    assert entity.hvac_mode == HVACMode.COOL  # Retains last known mode
+    assert entity.hvac_mode == HVACMode.OFF
+
+
+async def test_entity_unavailable_after_successful_device_removal(
+    coordinator: AuxCloudDataUpdateCoordinator, entity: TornadoClimateEntity
+) -> None:
+    """Test a device removed by a successful refresh becomes unavailable."""
+    coordinator.data = {}
+    coordinator.last_update_success = True
+    entity._handle_coordinator_update()
+    assert entity.available is False
 
 
 async def test_set_invalid_temperature(

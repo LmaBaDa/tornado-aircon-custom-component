@@ -4,17 +4,18 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
-from types import TracebackType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-import tenacity
 
 from custom_components.tornado.aux_cloud import (
+    REQUEST_TIMEOUT,
     AuxCloudAPI,
+    AuxCloudApiError,
     AuxCloudAuthError,
+    AuxCloudConnectionError,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def mock_response() -> MagicMock:
     """Mock aiohttp response."""
     response = MagicMock()
     response.__aenter__ = AsyncMock(return_value=response)
-    response.__aexit__ = AsyncMock()
+    response.__aexit__ = AsyncMock(return_value=False)
     response.text = AsyncMock()
     return response
 
@@ -58,7 +59,7 @@ def mock_session(mock_connector: MagicMock) -> MagicMock:
     """Mock aiohttp ClientSession."""
     session = MagicMock()
     session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock()
+    session.__aexit__ = AsyncMock(return_value=False)
     session.closed = False
     session.close = AsyncMock()  # Make close() awaitable
     session.connector = mock_connector
@@ -104,58 +105,60 @@ async def test_login_success(mock_session: MagicMock, mock_response: MagicMock) 
         assert api.userid == "user123"
 
         mock_session.post.assert_called_once()
+        call_kwargs = mock_session.post.call_args.kwargs
+        assert call_kwargs["timeout"] is REQUEST_TIMEOUT
+        assert call_kwargs["raise_for_status"] is True
         await api.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_injected_session_is_used_and_not_closed(
+    mock_session: MagicMock,
+) -> None:
+    """Test Home Assistant's injected session is used and remains managed by HA."""
+    with patch.object(
+        AuxCloudAPI, "get_shared_session", AsyncMock()
+    ) as get_shared_session:
+        api = AuxCloudAPI(
+            "test@example.com", "password", session=mock_session, region="eu"
+        )
+
+        assert await api._get_session() is mock_session
+        get_shared_session.assert_not_awaited()
+
+        await api.cleanup()
+        mock_session.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_injected_session_fails_clearly(
+    mock_session: MagicMock,
+) -> None:
+    """Test a closed Home Assistant session is never silently replaced."""
+    mock_session.closed = True
+    api = AuxCloudAPI("test@example.com", "password", session=mock_session, region="eu")
+
+    with pytest.raises(AuxCloudConnectionError, match="externally managed"):
+        await api._get_session()
 
 
 @pytest.mark.asyncio
 async def test_login_error_handling(
     mock_session: MagicMock, mock_response: MagicMock
 ) -> None:
-    """Test failed login using a fake client session that simulates a failed login."""
+    """Test a failed login through the injected Home Assistant session."""
+    mock_response.text.return_value = json.dumps(
+        {"status": 1, "msg": "Invalid credentials"}
+    )
     mock_session.post.return_value = mock_response
     api = AuxCloudAPI(
         "test@example.com", "wrongpassword", session=mock_session, region="eu"
     )
 
-    class FakeResponse:
-        async def __aenter__(self) -> "FakeResponse":
-            return self
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            pass
-
-        async def text(self) -> str:
-            return json.dumps({"status": 1, "msg": "Invalid credentials"})
-
-    class FakeClientSession:
-        def __init__(self, **kwargs: Any) -> None:
-            pass
-
-        async def __aenter__(self) -> "FakeClientSession":
-            return self
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            pass
-
-        def post(self, url: str, **kwargs: Any) -> FakeResponse:
-            _ = url, kwargs
-            return FakeResponse()
-
-    with (
-        patch("aiohttp.ClientSession", FakeClientSession),
-        pytest.raises(AuxCloudAuthError, match="Login failed: Invalid credentials"),
-    ):
+    with pytest.raises(AuxCloudAuthError, match="Login failed: Invalid credentials"):
         await api.login()
+
+    mock_session.post.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -281,17 +284,40 @@ async def test_list_families_network_error(
 
         mock_session.post.side_effect = TimeoutError("Connection timeout")
 
-        with pytest.raises(tenacity.RetryError) as exc_info:
+        with pytest.raises(TimeoutError, match="Connection timeout"):
             await api.list_families()
-
-        assert isinstance(exc_info.value.last_attempt.exception(), TimeoutError)
-        assert str(exc_info.value.last_attempt.exception()) == "Connection timeout"
 
         assert mock_session.post.call_count == NUM_OF_API_RETRIES
 
     finally:
         api.list_families.cache_clear()
         await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_list_families_socket_timeout_reraises_original_error(
+    api: AuxCloudAPI, mock_session: MagicMock
+) -> None:
+    """Test read timeouts are retried and re-raised without a RetryError wrapper."""
+    api.list_families.cache_clear()
+    mock_session.post.side_effect = aiohttp.SocketTimeoutError("read timeout")
+
+    with pytest.raises(aiohttp.SocketTimeoutError, match="read timeout"):
+        await api.list_families()
+
+    assert mock_session.post.call_count == NUM_OF_API_RETRIES
+    api.list_families.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_list_devices_empty_success_response(
+    api: AuxCloudAPI, mock_session: MagicMock, mock_response: MagicMock
+) -> None:
+    """Test an empty successful family response produces an empty device list."""
+    mock_response.text.return_value = json.dumps({"status": 0, "data": {}})
+    mock_session.post.return_value = mock_response
+
+    assert await api.list_devices("family1") == []
 
 
 @pytest.mark.asyncio
@@ -304,7 +330,7 @@ async def test_list_families_invalid_json(
     mock_session.post.return_value.__aenter__.return_value = mock_response
     mock_response.text.return_value = "Invalid JSON response"
 
-    with pytest.raises(tenacity.RetryError):
+    with pytest.raises(AuxCloudApiError):
         await api.list_families()
 
     api.list_families.cache_clear()
@@ -597,7 +623,7 @@ async def test_query_device_temperature_failure(
         {"event": {"payload": {"status": -1, "msg": "Temperature query failed"}}}
     )
 
-    with pytest.raises(tenacity.RetryError):
+    with pytest.raises(AuxCloudApiError):
         await api.query_device_temperature("dev1", "sess1")
 
 
@@ -812,11 +838,8 @@ async def test_list_families_cache_error(
 
         mock_session.post.side_effect = TimeoutError("Connection timeout")
 
-        with pytest.raises(tenacity.RetryError) as exc_info:
+        with pytest.raises(TimeoutError, match="Connection timeout"):
             await api.list_families()
-
-        assert isinstance(exc_info.value.last_attempt.exception(), TimeoutError)
-        assert str(exc_info.value.last_attempt.exception()) == "Connection timeout"
 
         mock_session.post.side_effect = None
         mock_session.post.return_value = mock_response

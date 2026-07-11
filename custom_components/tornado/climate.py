@@ -18,7 +18,11 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .aux_cloud import AuxCloudAPI
 from .const import DOMAIN
@@ -28,6 +32,8 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 _LOGGER = logging.getLogger(__name__)
+
+UPDATE_INTERVAL = timedelta(minutes=5)
 
 # Map Tornado modes to Home Assistant modes (updated to match remote)
 HVAC_MODE_MAP = {
@@ -91,44 +97,42 @@ async def async_setup_entry(
         _LOGGER.info("Initial login for AuxCloud client")
         await client.login()
 
-    coordinator = AuxCloudDataUpdateCoordinator(hass, client)
-    await coordinator.async_refresh()
+    coordinator = AuxCloudDataUpdateCoordinator(hass, client, config_entry)
+    await coordinator.async_config_entry_first_refresh()
+    entry_data["coordinator"] = coordinator
 
-    try:
-        devices = await client.get_devices()
-        entities = []
-
-        for device in devices:
-            try:
-                entities.append(
-                    TornadoClimateEntity(
-                        hass,
-                        coordinator,
-                        device,
-                    )
+    entities = []
+    for device in coordinator.data.values():
+        try:
+            entities.append(
+                TornadoClimateEntity(
+                    coordinator,
+                    device,
                 )
-            except Exception:
-                _LOGGER.exception(
-                    "Error setting up device %s", device.get("endpointId")
-                )
+            )
+        except Exception:
+            _LOGGER.exception("Error setting up device %s", device.get("endpointId"))
 
-        async_add_entities(entities)
-
-    except Exception:
-        _LOGGER.exception("Error setting up Tornado climate platform")
+    async_add_entities(entities)
 
 
 class AuxCloudDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching AuxCloud data."""
 
-    def __init__(self, hass: HomeAssistant, api: AuxCloudAPI) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: AuxCloudAPI,
+        config_entry: ConfigEntry | None,
+    ) -> None:
         """Initialize the coordinator."""
         self.api = api
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name="AuxCloud",
-            update_interval=timedelta(minutes=1),
+            update_interval=UPDATE_INTERVAL,
         )
 
     async def _async_update_data(self) -> dict:
@@ -148,20 +152,19 @@ class AuxCloudDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(error_msg) from err
 
 
-class TornadoClimateEntity(ClimateEntity):
+class TornadoClimateEntity(
+    CoordinatorEntity[AuxCloudDataUpdateCoordinator], ClimateEntity
+):
     """Representation of a Tornado AC Climate device."""
 
     def __init__(
         self,
-        hass: HomeAssistant,
         coordinator: AuxCloudDataUpdateCoordinator,
         device: dict,
         *_: Any,  # Using *_ to ignore additional arguments like config_entry
     ) -> None:
         """Initialize the climate device."""
-        super().__init__()
-        self.hass = hass
-        self._coordinator = coordinator
+        super().__init__(coordinator)
         self._client = coordinator.api
         self._device_id = device["endpointId"]
         self._attr_unique_id = f"{device['endpointId']}_climate"
@@ -195,7 +198,6 @@ class TornadoClimateEntity(ClimateEntity):
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_swing_mode = None
         self._attr_hvac_action = HVACAction.OFF
-        self._attr_available = False
         # Create entity description
         self.entity_description = ClimateEntityDescription(
             key=self._attr_unique_id,
@@ -203,21 +205,19 @@ class TornadoClimateEntity(ClimateEntity):
             translation_key=DOMAIN,
         )
 
-        # Add coordinator listener
-        coordinator.async_add_listener(self._handle_coordinator_update)
         _LOGGER.info("Entity initialized for device %s", self._device_id)
 
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
-        return self._coordinator.last_update_success and self._device is not None
+        """Return availability using the last successful AuxCloud data."""
+        return self._device is not None
 
     @property
     def _device(self) -> dict | None:
         """Get current device data from coordinator."""
-        if not self._coordinator.data:
+        if not self.coordinator.data:
             return None
-        return self._coordinator.data.get(self._device_id)
+        return self.coordinator.data.get(self._device_id)
 
     @property
     def icon(self) -> str:
@@ -230,7 +230,7 @@ class TornadoClimateEntity(ClimateEntity):
         return self._attr_device_info
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass."""
+        """Initialize state and subscribe to coordinator updates."""
         await super().async_added_to_hass()
         self._handle_coordinator_update()
 
@@ -244,7 +244,6 @@ class TornadoClimateEntity(ClimateEntity):
         )
 
         if not self._device:
-            self._attr_available = False
             self.async_write_ha_state()
             return
 
@@ -283,8 +282,6 @@ class TornadoClimateEntity(ClimateEntity):
                 (1, 1): "both",
             }.get((v_dir, h_dir), "off")
 
-            self._attr_available = True
-
             _LOGGER.debug(
                 "Updated state for %s: mode=%s, action=%s, fan=%s, temp=%s, envtemp=%s",
                 self._device_id,
@@ -297,13 +294,8 @@ class TornadoClimateEntity(ClimateEntity):
 
         except Exception:
             _LOGGER.exception("Error updating state for %s", self._device_id)
-            self._attr_available = False
 
         self.async_write_ha_state()
-
-    async def async_update(self) -> None:
-        """Update the entity."""
-        await self._coordinator.async_request_refresh()
 
     async def _set_device_params(self, params: dict) -> None:
         """Set device parameters and handle any errors."""

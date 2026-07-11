@@ -6,8 +6,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import aiohttp  # Add this import
 from homeassistant.const import Platform
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 # Updated import name
 from .aux_cloud import AuxCloudAPI
@@ -26,25 +27,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
-    # Create a shared session for the entry
-    session = aiohttp.ClientSession()
-    hass.data[DOMAIN][entry.entry_id]["session"] = session
-
     client = AuxCloudAPI(
         email=entry.data[CONF_EMAIL],
         password=entry.data[CONF_PASSWORD],
         region=entry.data[CONF_REGION],
-        session=session,
+        session=async_get_clientsession(hass),
     )
 
     try:
         await client.login()
-        await client.refresh()
-    except Exception:
+    except Exception as err:
         await client.cleanup()
-        await session.close()
         _LOGGER.exception("Failed to connect to AUX AC")
-        return False
+        message = "Failed to connect to AUX AC"
+        raise ConfigEntryNotReady(message) from err
 
     hass.data[DOMAIN][entry.entry_id]["client"] = client
 
@@ -58,12 +54,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
         client = entry_data.get("client")
-        session = entry_data.get("session")
 
         if client:
             await client.cleanup()
-        if session and not session.closed:
-            await session.close()
 
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok

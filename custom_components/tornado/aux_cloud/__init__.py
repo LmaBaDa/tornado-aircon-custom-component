@@ -67,6 +67,12 @@ SPOOF_SYSTEM = "android"
 SPOOF_APP_PLATFORM = "android"
 API_SERVER_URL_EU = "https://app-service-deu-f0e9ebbb.smarthomecs.de"
 API_SERVER_URL_USA = "https://app-service-usa-fd7cc04c.smarthomecs.com"
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(
+    total=45,
+    connect=10,
+    sock_connect=10,
+    sock_read=30,
+)
 
 
 class AuxCloudError(Exception):
@@ -101,6 +107,7 @@ def create_retry_decorator(
         ),
         wait=wait_exponential(multiplier=1, min=4, max=10),
         stop=stop_after_attempt(max_attempts),
+        reraise=True,
         before_sleep=lambda retry_state: _LOGGER.warning(
             "Request failed, retrying in %s seconds...",
             retry_state.next_action.sleep,
@@ -149,9 +156,7 @@ class AuxCloudAPI:
                 connector = await cls.get_shared_connector()
                 cls._shared_session = aiohttp.ClientSession(
                     connector=connector,
-                    timeout=aiohttp.ClientTimeout(
-                        total=30, connect=10, sock_connect=10, sock_read=10
-                    ),
+                    timeout=REQUEST_TIMEOUT,
                     raise_for_status=True,
                 )
                 _LOGGER.info(
@@ -174,25 +179,26 @@ class AuxCloudAPI:
         # If session is provided externally, we don't own it
         self._session_owner = session is None
         self.data: dict[str, Any] = {}
-        self.timeout = aiohttp.ClientTimeout(
-            total=30, connect=10, sock_connect=10, sock_read=10
-        )
+        self.timeout = REQUEST_TIMEOUT
         _LOGGER.info(
             "Initialized AuxCloudAPI with email: %s, region: %s", email, region
         )
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get aiohttp client session."""
-        if self._session_owner:
-            if self.session is None or self.session.closed:
-                if getattr(self, "_cleaned_up", False):
-                    msg = "Cannot create new session after cleanup"
-                    raise RuntimeError(msg)
-                self.session = await self.get_shared_session()
-                _LOGGER.debug("Using shared session: %s", id(self.session))
+        if self.session is not None and not self.session.closed:
             return self.session
 
-        return await self.get_shared_session()
+        if not self._session_owner:
+            msg = "The externally managed session is closed"
+            raise AuxCloudConnectionError(msg)
+        if getattr(self, "_cleaned_up", False):
+            msg = "Cannot create new session after cleanup"
+            raise RuntimeError(msg)
+
+        self.session = await self.get_shared_session()
+        _LOGGER.debug("Using shared session: %s", id(self.session))
+        return self.session
 
     async def cleanup(self) -> None:
         """Clean up resources."""
@@ -351,6 +357,8 @@ class AuxCloudAPI:
                 AES_INITIAL_VECTOR, md5_hash, json_payload.encode()
             ),
             headers=self._get_headers(timestamp=f"{current_time}", token=token),
+            timeout=self.timeout,
+            raise_for_status=True,
         ) as resp:
             data = await resp.text()
             json_data = json.loads(data)
@@ -419,6 +427,8 @@ class AuxCloudAPI:
         async with session.post(
             f"{self.url}/appsync/group/member/getfamilylist",
             headers=self._get_headers(),
+            timeout=self.timeout,
+            raise_for_status=True,
         ) as response:
             data = await response.text()
             try:
@@ -497,16 +507,18 @@ class AuxCloudAPI:
             f"{self.url}/appsync/group/{device_endpoint}",
             data='{"pids":[]}' if not shared else '{"endpointId":""}',
             headers=self._get_headers(familyid=family_id),
+            timeout=self.timeout,
+            raise_for_status=True,
         ) as response:
             data = await response.text()
             json_data = json.loads(data)
 
             if "status" in json_data and json_data["status"] == 0:
-                if "endpoints" in json_data["data"]:
-                    devices = json_data["data"]["endpoints"]
-                elif "shareFromOther" in json_data["data"]:
+                response_data = json_data.get("data", {})
+                devices = response_data.get("endpoints", [])
+                if "shareFromOther" in response_data:
                     devices = [
-                        dev["devinfo"] for dev in json_data["data"]["shareFromOther"]
+                        dev["devinfo"] for dev in response_data["shareFromOther"]
                     ]
 
                 # Initialize family data structure if needed
@@ -637,6 +649,8 @@ class AuxCloudAPI:
             f"{self.url}/device/control/v2/querystate",
             data=json.dumps(data, separators=(",", ":")),
             headers=self._get_headers(),
+            timeout=self.timeout,
+            raise_for_status=True,
         ) as response:
             data = await response.text()
             _LOGGER.debug("Received response: %s", data)
@@ -672,6 +686,8 @@ class AuxCloudAPI:
                 separators=(",", ":"),
             ),
             headers=self._get_headers(),
+            timeout=self.timeout,
+            raise_for_status=True,
         ) as resp:
             data = await resp.text()
             _LOGGER.debug("Received response: %s", data)
@@ -789,6 +805,8 @@ class AuxCloudAPI:
             params={"license": LICENSE},
             data=json.dumps(data, separators=(",", ":")),
             headers=self._get_headers(),
+            timeout=self.timeout,
+            raise_for_status=True,
         ) as resp:
             response_text = await resp.text()
             json_data = json.loads(response_text)
